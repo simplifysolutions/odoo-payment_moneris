@@ -26,12 +26,12 @@ class AcquirerMoneris(osv.Model):
         if environment == 'prod':
             return {
                 'moneris_form_url': 'https://www3.moneris.com/HPPDP/index.php',
-                'moneris_rest_url': 'https://api.moneris.com/v1/oauth2/token',
+                'moneris_auth_url': 'https://www3.moneris.com/HPPDP/verifyTxn.php',
             }
         else:
             return {
                 'moneris_form_url': 'https://esqa.moneris.com/HPPDP/index.php',
-                'moneris_rest_url': 'https://api.sandbox.moneris.com/v1/oauth2/token',
+                'moneris_auth_url': 'https://esqa.moneris.com/HPPDP/verifyTxn.php',
             }
 
     def _get_providers(self, cr, uid, context=None):
@@ -137,6 +137,36 @@ class AcquirerMoneris(osv.Model):
         acquirer = self.browse(cr, uid, id, context=context)
         return self._get_moneris_urls(cr, uid, acquirer.environment, context=context)['moneris_form_url']
 
+    def _moneris_s2s_get_access_token(self, cr, uid, ids, context=None):
+        """
+        Note: see # see http://stackoverflow.com/questions/2407126/python-urllib2-basic-auth-problem
+        for explanation why we use Authorization header instead of urllib2
+        password manager
+        """
+        res = dict.fromkeys(ids, False)
+        parameters = werkzeug.url_encode({'grant_type': 'client_credentials'})
+
+        for acquirer in self.browse(cr, uid, ids, context=context):
+            tx_url = self._get_moneris_urls(cr, uid, acquirer.environment)['moneris_rest_url']
+            request = urllib2.Request(tx_url, parameters)
+
+            # add other headers (https://developer.moneris.com/webapps/developer/docs/integration/direct/make-your-first-call/)
+            request.add_header('Accept', 'application/json')
+            request.add_header('Accept-Language', 'en_US')
+
+            # add authorization header
+            base64string = base64.encodestring('%s:%s' % (
+                acquirer.moneris_api_username,
+                acquirer.moneris_api_password)
+            ).replace('\n', '')
+            request.add_header("Authorization", "Basic %s" % base64string)
+
+            request = urllib2.urlopen(request)
+            result = request.read()
+            res[acquirer.id] = json.loads(result).get('access_token')
+            request.close()
+        return res
+
 
 class TxMoneris(osv.Model):
     _inherit = 'payment.transaction'
@@ -183,8 +213,10 @@ class TxMoneris(osv.Model):
             ),
         """
         # TODO: txn_id: shoudl be false at draft, set afterwards, and verified with txn details
-        if tx.acquirer_reference and data.get('txn_num') != tx.acquirer_reference:
-            invalid_parameters.append(('txn_num', data.get('txn_num'), tx.acquirer_reference))
+        if tx.moneris_txn_id and data.get('txn_num') != tx.moneris_txn_id:
+            invalid_parameters.append(('txn_num', data.get('txn_num'), tx.moneris_txn_id))
+        if tx.acquirer_reference and data.get('response_order_id') != tx.acquirer_reference:
+            invalid_parameters.append(('response_order_id', data.get('response_order_id'), tx.acquirer_reference))
         # check what is buyed
         if float_compare(float(data.get('charge_total', '0.0')), (tx.amount), 2) != 0:
             invalid_parameters.append(('charge_total', data.get('charge_total'), '%.2f' % tx.amount))
@@ -214,14 +246,174 @@ class TxMoneris(osv.Model):
         data = {
             'moneris_txn_id': data.get('txn_num'),
             'moneris_txn_type': data.get('trans_name'),
-            'partner_reference': data.get('cardholder')
+            'partner_reference': data.get('cardholder'),
+            'acquirer_reference': data.get('response_order_id')
         }
         if status == '1':
             _logger.info('Validated Moneris payment for tx %s: set as done' % (tx.reference))
-            data.update(state='done', acquirer_reference=data.get('response_order_id'), date_validate=data.get('date_stamp', fields.datetime.now()))
+            data.update(state='done', date_validate=data.get('date_stamp', fields.datetime.now()))
             return tx.write(data)
         else:
             error = 'Received unrecognized status for Moneris payment %s: %s, set as error' % (tx.reference, status)
             _logger.info(error)
             data.update(state='error', state_message=error)
             return tx.write(data)
+
+    # --------------------------------------------------
+    # SERVER2SERVER RELATED METHODS
+    # --------------------------------------------------
+
+    def _moneris_try_url(self, request, tries=3, context=None):
+        """ Try to contact Moneris. Due to some issues, internal service errors
+        seem to be quite frequent. Several tries are done before considering
+        the communication as failed.
+
+         .. versionadded:: pre-v8 saas-3
+         .. warning::
+
+            Experimental code. You should not use it before OpenERP v8 official
+            release.
+        """
+        done, res = False, None
+        while (not done and tries):
+            try:
+                res = urllib2.urlopen(request)
+                done = True
+            except urllib2.HTTPError as e:
+                res = e.read()
+                e.close()
+                if tries and res and json.loads(res)['name'] == 'INTERNAL_SERVICE_ERROR':
+                    _logger.warning('Failed contacting Moneris, retrying (%s remaining)' % tries)
+            tries = tries - 1
+        if not res:
+            pass
+            # raise openerp.exceptions.
+        result = res.read()
+        res.close()
+        return result
+
+    def _moneris_s2s_send(self, cr, uid, values, cc_values, context=None):
+        """
+         .. versionadded:: pre-v8 saas-3
+         .. warning::
+
+            Experimental code. You should not use it before OpenERP v8 official
+            release.
+        """
+        tx_id = self.create(cr, uid, values, context=context)
+        tx = self.browse(cr, uid, tx_id, context=context)
+
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer %s' % tx.acquirer_id._moneris_s2s_get_access_token()[tx.acquirer_id.id],
+        }
+        data = {
+            'intent': 'sale',
+            'transactions': [{
+                'amount': {
+                    'total': '%.2f' % tx.amount,
+                    'currency': tx.currency_id.name,
+                },
+                'description': tx.reference,
+            }]
+        }
+        if cc_values:
+            data['payer'] = {
+                'payment_method': 'credit_card',
+                'funding_instruments': [{
+                    'credit_card': {
+                        'number': cc_values['number'],
+                        'type': cc_values['brand'],
+                        'expire_month': cc_values['expiry_mm'],
+                        'expire_year': cc_values['expiry_yy'],
+                        'cvv2': cc_values['cvc'],
+                        'first_name': tx.partner_name,
+                        'last_name': tx.partner_name,
+                        'billing_address': {
+                            'line1': tx.partner_address,
+                            'city': tx.partner_city,
+                            'country_code': tx.partner_country_id.code,
+                            'postal_code': tx.partner_zip,
+                        }
+                    }
+                }]
+            }
+        else:
+            # TODO: complete redirect URLs
+            data['redirect_urls'] = {
+                # 'return_url': 'http://example.com/your_redirect_url/',
+                # 'cancel_url': 'http://example.com/your_cancel_url/',
+            },
+            data['payer'] = {
+                'payment_method': 'moneris',
+            }
+        data = json.dumps(data)
+
+        request = urllib2.Request('https://api.sandbox.moneris.com/v1/payments/payment', data, headers)
+        result = self._moneris_try_url(request, tries=3, context=context)
+        return (tx_id, result)
+
+    def _moneris_s2s_get_invalid_parameters(self, cr, uid, tx, data, context=None):
+        """
+         .. versionadded:: pre-v8 saas-3
+         .. warning::
+
+            Experimental code. You should not use it before OpenERP v8 official
+            release.
+        """
+        invalid_parameters = []
+        return invalid_parameters
+
+    def _moneris_s2s_validate(self, cr, uid, tx, data, context=None):
+        """
+         .. versionadded:: pre-v8 saas-3
+         .. warning::
+
+            Experimental code. You should not use it before OpenERP v8 official
+            release.
+        """
+        values = json.loads(data)
+        status = values.get('state')
+        if status in ['approved']:
+            _logger.info('Validated Moneris s2s payment for tx %s: set as done' % (tx.reference))
+            tx.write({
+                'state': 'done',
+                'date_validate': values.get('udpate_time', fields.datetime.now()),
+                'moneris_txn_id': values['id'],
+            })
+            return True
+        elif status in ['pending', 'expired']:
+            _logger.info('Received notification for Moneris s2s payment %s: set as pending' % (tx.reference))
+            tx.write({
+                'state': 'pending',
+                # 'state_message': data.get('pending_reason', ''),
+                'moneris_txn_id': values['id'],
+            })
+            return True
+        else:
+            error = 'Received unrecognized status for Moneris s2s payment %s: %s, set as error' % (tx.reference, status)
+            _logger.info(error)
+            tx.write({
+                'state': 'error',
+                # 'state_message': error,
+                'moneris_txn_id': values['id'],
+            })
+            return False
+
+    def _moneris_s2s_get_tx_status(self, cr, uid, tx, context=None):
+        """
+         .. versionadded:: pre-v8 saas-3
+         .. warning::
+
+            Experimental code. You should not use it before OpenERP v8 official
+            release.
+        """
+        # TDETODO: check tx.moneris_txn_id is set
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer %s' % tx.acquirer_id._moneris_s2s_get_access_token()[tx.acquirer_id.id],
+        }
+        url = 'https://api.sandbox.moneris.com/v1/payments/payment/%s' % (tx.moneris_txn_id)
+        request = urllib2.Request(url, headers=headers)
+        data = self._moneris_try_url(request, tries=3, context=context)
+        return self.s2s_feedback(cr, uid, tx.id, data, context=context)

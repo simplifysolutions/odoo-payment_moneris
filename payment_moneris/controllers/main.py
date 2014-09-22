@@ -50,26 +50,36 @@ class MonerisController(http.Controller):
 
         Once data is validated, process it. """
         res = False
-        #new_post = dict(post, cmd='_notify-validate')
         cr, uid, context = request.cr, request.uid, request.context
-        reference = post.get('item_number')
+        reference = post.get('rvaroid')
         tx = None
         if reference:
             tx_ids = request.registry['payment.transaction'].search(cr, uid, [('reference', '=', reference)], context=context)
             if tx_ids:
                 tx = request.registry['payment.transaction'].browse(cr, uid, tx_ids[0], context=context)
-        """moneris_urls = request.registry['payment.acquirer']._get_moneris_urls(cr, uid, tx and tx.acquirer_id and tx.acquirer_id.env or 'prod', context=context)
-        validate_url = moneris_urls['moneris_form_url']
+        if tx:
+            moneris_urls = request.registry['payment.acquirer']._get_moneris_urls(cr, uid, tx and tx.acquirer_id and tx.acquirer_id.env or 'prod', context=context)
+            validate_url = moneris_urls['moneris_auth_url']
+        else:
+            _logger.warning('Moneris: No order found')
+            return res
+            
+        new_post = dict(ps_store_id=post.get('rvarid'), hpp_key=post.get('rvarkey'), transactionKey=post.get('transactionKey'))
+        
         urequest = urllib2.Request(validate_url, werkzeug.url_encode(new_post))
         uopen = urllib2.urlopen(urequest)
-        resp = uopen.read() """
+        resp = uopen.read()
+
+        part = resp.split('<br>')
+        new_response = dict([s.split(' = ') for s in part])
+        _logger.info(new_response)
+
         success = post.get('response_code')
-        
-        if int(success) < 50 and post.get('result') == '1':
+        if int(success) < 50 and post.get('result') == '1' and int(new_response.get('response_code')) < 50 and new_response.get('status') == 'Valid-Approved' and new_response.get('amount') == post.get('charge_total') and new_response.get('transactionKey') == post.get('transactionKey') and new_response.get('order_id') == post.get('response_order_id'):
             _logger.info('Moneris: validated data')
             res = request.registry['payment.transaction'].form_feedback(cr, SUPERUSER_ID, post, 'moneris', context=context)
         else:
-            _logger.warning('Moneris: answered INVALID on data verification' + success)
+            _logger.warning('Moneris: answered INVALID on data verification: ' + new_response.get('status'))
         return res
 
     @http.route('/payment/moneris/ipn/', type='http', auth='none', methods=['POST'])
@@ -84,17 +94,19 @@ class MonerisController(http.Controller):
         """ Moneris DPN """
         _logger.info('Beginning Moneris DPN form_feedback with post data %s', pprint.pformat(post))  # debug
         return_url = self._get_return_url(**post)
-        self.moneris_validate_data(**post)
-        return werkzeug.utils.redirect(return_url)
+        if self.moneris_validate_data(**post):
+            return werkzeug.utils.redirect(return_url)
+        else:
+            return werkzeug.utils.redirect(self._cancel_url)
 
     @http.route('/payment/moneris/cancel', type='http', auth="none")
     def moneris_cancel(self, **post):
         """ When the user cancels its Moneris payment: GET on this route """
         cr, uid, context = request.cr, SUPERUSER_ID, request.context
         _logger.info('Beginning Moneris cancel with post data %s', pprint.pformat(post))  # debug
-        return_url = '/shop/checkout'
         reference = post.get('rvaroid')
         if reference:
+            return_url = '/shop/payment/get_status/' + reference
             sales_order_obj = request.registry['sale.order']
             tx_ids = sales_order_obj.search(cr, uid, [('name', '=', reference)], context=context)
             if tx_ids:
@@ -103,4 +115,6 @@ class MonerisController(http.Controller):
                     _logger.info('cancel')
                     tx.write({'state': 'cancel'})
                 _logger.info('done')
+        else:
+            return_url = '/shop/payment/validate'
         return werkzeug.utils.redirect(return_url)
