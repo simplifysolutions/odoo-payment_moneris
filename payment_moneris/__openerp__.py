@@ -13,6 +13,7 @@
         'views/payment_acquirer.xml',
         'views/res_config_view.xml',
         'data/moneris.xml',
+        'views/website_template.xml',
     ],
     'installable': True,
 }

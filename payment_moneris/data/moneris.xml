@@ -7,9 +7,10 @@
             <field name="provider">moneris</field>
             <field name="company_id" ref="base.main_company"/>
             <field name="view_template_id" ref="moneris_acquirer_button"/>
+            <field name="validation">manual</field>
             <field name="environment">test</field>
             <field name="pre_msg"><![CDATA[
-<p>You will be redirected to the Moneris website after cliking on the payment button.</p>]]></field>
+<p>You will be redirected to the Moneris website after clicking on the payment button.</p>]]></field>
             <field name="moneris_email_account">dummy</field>
             <field name="moneris_seller_account">dummy</field>
             <field name="moneris_api_username">dummy</field>

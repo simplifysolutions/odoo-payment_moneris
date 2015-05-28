@@ -20,7 +20,7 @@ _logger = logging.getLogger(__name__)
 
 class AcquirerMoneris(osv.Model):
     _inherit = 'payment.acquirer'
-
+    
     def _get_moneris_urls(self, cr, uid, environment, context=None):
         """ Moneris URLS """
         if environment == 'prod':
@@ -127,6 +127,11 @@ class AcquirerMoneris(osv.Model):
             'notify_url': '%s' % urlparse.urljoin(base_url, MonerisController._notify_url),
             'cancel_return': '%s' % urlparse.urljoin(base_url, MonerisController._cancel_url),
         })
+        tx_ids = self.pool['payment.transaction'].search(cr, uid, [('reference', '=', tx_values['reference'])], context=context)
+        for tx in tx_ids:
+            tx = self.pool['payment.transaction'].browse(cr, uid, tx, context=context)
+            tx.write({'amount': tx_values['amount']})
+                    
         if acquirer.fees_active:
             moneris_tx_values['handling'] = '%.2f' % moneris_tx_values.pop('fees', 0.0)
         if moneris_tx_values.get('return_url'):
@@ -174,6 +179,14 @@ class TxMoneris(osv.Model):
     _columns = {
         'moneris_txn_id': fields.char('Transaction ID'),
         'moneris_txn_type': fields.char('Transaction type'),
+        'moneris_txn_oid': fields.char('Order ID'),
+        'moneris_txn_response': fields.char('Response Code'),
+        'moneris_txn_ISO': fields.char('ISO'),
+        'moneris_txn_eci': fields.char('Electronic Commerce Indicator'),
+        'moneris_txn_card': fields.char('Card Type'),
+        'moneris_txn_cardf4l4': fields.char('First 4 Last 4'),
+        'moneris_txn_bankid': fields.char('Bank Transaction ID'),
+        'moneris_txn_bankapp': fields.char('Bank Approval Code'),
     }
 
     # --------------------------------------------------
@@ -234,10 +247,12 @@ class TxMoneris(osv.Model):
             invalid_parameters.append(('payer_id', data.get('payer_id'), tx.partner_reference))
         """
         # check seller
+        '''
         if data.get('rvarid') != tx.acquirer_id.moneris_email_account:
             invalid_parameters.append(('rvarid', data.get('rvarid'), tx.acquirer_id.moneris_email_account))
         if data.get('rvarkey') != tx.acquirer_id.moneris_seller_account:
             invalid_parameters.append(('rvarkey', data.get('rvarkey'), tx.acquirer_id.moneris_seller_account))
+        '''
 
         return invalid_parameters
 
@@ -246,6 +261,14 @@ class TxMoneris(osv.Model):
         data = {
             'moneris_txn_id': data.get('txn_num'),
             'moneris_txn_type': data.get('trans_name'),
+            'moneris_txn_oid': data.get('response_order_id'),
+            'moneris_txn_response': data.get('response_code'),
+            'moneris_txn_ISO': data.get('iso_code'),
+            'moneris_txn_eci': data.get('Eci'),
+            'moneris_txn_card': data.get('Card'),
+            'moneris_txn_cardf4l4': data.get('f4l4'),
+            'moneris_txn_bankid': data.get('bank_transaction_id'),
+            'moneris_txn_bankapp': data.get('bank_approval_code'),
             'partner_reference': data.get('cardholder'),
             'acquirer_reference': data.get('response_order_id')
         }

@@ -8,6 +8,7 @@ import logging
 import pprint
 import urllib2
 import werkzeug
+from openerp import SUPERUSER_ID
 
 def unescape(s):
     s = s.replace("&lt;", "<")
@@ -58,28 +59,43 @@ class MonerisController(http.Controller):
             if tx_ids:
                 tx = request.registry['payment.transaction'].browse(cr, uid, tx_ids[0], context=context)
         if tx:
-            moneris_urls = request.registry['payment.acquirer']._get_moneris_urls(cr, uid, tx and tx.acquirer_id and tx.acquirer_id.env or 'prod', context=context)
+            moneris_urls = request.registry['payment.acquirer']._get_moneris_urls(cr, uid, tx and tx.acquirer_id and tx.acquirer_id.environment or 'prod', context=context)
             validate_url = moneris_urls['moneris_auth_url']
         else:
             _logger.warning('Moneris: No order found')
             return res
-            
-        new_post = dict(ps_store_id=post.get('rvarid'), hpp_key=post.get('rvarkey'), transactionKey=post.get('transactionKey'))
+
+        sid = tx.acquirer_id.moneris_email_account
+        key = tx.acquirer_id.moneris_seller_account
+
+        new_post = dict(ps_store_id=sid, hpp_key=key, transactionKey=post.get('transactionKey'))
         
         urequest = urllib2.Request(validate_url, werkzeug.url_encode(new_post))
         uopen = urllib2.urlopen(urequest)
         resp = uopen.read()
+        _logger.info(resp)
 
         part = resp.split('<br>')
         new_response = dict([s.split(' = ') for s in part])
         _logger.info(new_response)
 
         success = post.get('response_code')
-        if int(success) < 50 and post.get('result') == '1' and int(new_response.get('response_code')) < 50 and new_response.get('status') == 'Valid-Approved' and new_response.get('amount') == post.get('charge_total') and new_response.get('transactionKey') == post.get('transactionKey') and new_response.get('order_id') == post.get('response_order_id'):
-            _logger.info('Moneris: validated data')
-            res = request.registry['payment.transaction'].form_feedback(cr, SUPERUSER_ID, post, 'moneris', context=context)
-        else:
-            _logger.warning('Moneris: answered INVALID on data verification: ' + new_response.get('status'))
+        try:
+            if (int(success) < 50 and post.get('result') == '1' and 
+                    new_response.get('response_code') is not 'null' and int(new_response.get('response_code')) < 50 and 
+                    new_response.get('status') == 'Valid-Approved' and 
+                    new_response.get('amount') is not 'null' and float(new_response.get('amount')) == float(post.get('charge_total')) and 
+                    new_response.get('transactionKey') == post.get('transactionKey') and 
+                    new_response.get('order_id') == post.get('response_order_id')
+                ):
+                _logger.info('Moneris: validated data')
+                res = request.registry['payment.transaction'].form_feedback(cr, SUPERUSER_ID, post, 'moneris', context=context)
+            else:
+                _logger.warning('Moneris: answered INVALID on data verification: ' + new_response.get('status') + '/' + post.get('response_order_id'))
+        except ValueError:
+            _logger.warning('Moneris: answered INVALID on data verification: ' + new_response.get('status') + '/' + post.get('response_order_id'))
+
+
         return res
 
     @http.route('/payment/moneris/ipn/', type='http', auth='none', methods=['POST'])
@@ -106,15 +122,27 @@ class MonerisController(http.Controller):
         _logger.info('Beginning Moneris cancel with post data %s', pprint.pformat(post))  # debug
         reference = post.get('rvaroid')
         if reference:
-            return_url = '/shop/payment/get_status/' + reference
             sales_order_obj = request.registry['sale.order']
-            tx_ids = sales_order_obj.search(cr, uid, [('name', '=', reference)], context=context)
-            if tx_ids:
-                tx = sales_order_obj.browse(cr, uid, tx_ids[0], context=context)
-                if tx:
+            so_ids = sales_order_obj.search(cr, uid, [('name', '=', reference)], context=context)
+            if so_ids:
+                '''return_url = '/shop/payment/get_status/' + str(so_ids[0])'''
+                so = sales_order_obj.browse(cr, uid, so_ids[0], context=context)
+                if so:
                     _logger.info('cancel')
+                    '''
                     tx.write({'state': 'cancel'})
+                    sale_order_obj.action_cancel(cr, SUPERUSER_ID, [order.id], context=request.context)
+                    '''
+                    '''
+                    tx_ids = request.registry['payment.transaction'].search(cr, uid, [('reference', '=', reference)], context=context)
+                    for tx in tx_ids:
+                        tx = request.registry['payment.transaction'].browse(cr, uid, tx, context=context)
+                        tx.write({'state': 'cancel'})
+                    sales_order_obj.write(cr, SUPERUSER_ID, [so.id], {'payment_acquirer_id': None,}, context=context)
+                    '''
+                    '''
+                    action_cancel(cr, SUPERUSER_ID, so.id, context=request.context)
+                    '''
                 _logger.info('done')
-        else:
-            return_url = '/shop/payment/validate'
+        return_url = '/shop/cart'
         return werkzeug.utils.redirect(return_url)

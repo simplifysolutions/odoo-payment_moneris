@@ -7,8 +7,6 @@
                 <input type="hidden" name="ps_store_id" t-att-value="acquirer.moneris_email_account"/>
                 <input type="hidden" name="hpp_key" t-att-value="acquirer.moneris_seller_account"/>
                 <input type="hidden" name="charge_total" t-att-value="tx_values['amount'] or '0.0'"/>
-                <input type="hidden" name="rvarid" t-att-value="acquirer.moneris_email_account"/>
-                <input type="hidden" name="rvarkey" t-att-value="acquirer.moneris_seller_account"/>
                 <input type="hidden" name="rvaroid" t-att-value="tx_values['item_number']"/>
                 <input type="hidden" name="rvarret" t-att-value='tx_values.get("custom")'/>
                 

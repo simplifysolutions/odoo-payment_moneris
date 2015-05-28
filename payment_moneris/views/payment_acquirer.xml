@@ -37,6 +37,14 @@
                         <group>
                             <field name="moneris_txn_id"/>
                             <field name="moneris_txn_type"/>
+                            <field name="moneris_txn_oid"/>
+                            <field name="moneris_txn_response"/>
+                            <field name="moneris_txn_ISO"/>
+                            <field name="moneris_txn_eci"/>
+                            <field name="moneris_txn_card"/>
+                            <field name="moneris_txn_cardf4l4"/>
+                            <field name="moneris_txn_bankid"/>
+                            <field name="moneris_txn_bankapp"/>
                         </group>
                     </page>
                 </xpath>
