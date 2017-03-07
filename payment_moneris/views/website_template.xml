@@ -1,10 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <openerp>
 <data>
+    <!--
     <template id="confirmation" inherit_id="website_sale.confirmation">
       <xpath expr="//div[@class='col-md-8 oe_cart']/h2" position="after">
         <div id="kthx_message">Please check your email for more details.</div>
       </xpath>
+      -->
     </template>
 </data>
 </openerp>
