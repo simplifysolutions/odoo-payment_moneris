@@ -1,43 +1,35 @@
 # -*- coding: utf-8 -*-
+# Copyright (C) 2015 xyenDev. All Rights Reserved
+# Copyright (C) 2018 Simplify Solutions. All Rights Reserved
+# License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl)
 
-from openerp.osv import fields, osv
+from odoo import fields, models
 
 
-class ResCompany(osv.Model):
-    _inherit = "res.company"
+class ResCompany(models.Model):
+    _inherit = 'res.company'
 
-    def _get_moneris_account(self, cr, uid, ids, name, arg, context=None):
-        Acquirer = self.pool['payment.acquirer']
-        company_id = self.pool['res.users'].browse(cr, uid, uid, context=context).company_id.id
-        moneris_ids = Acquirer.search(cr, uid, [
-            ('website_published', '=', True),
-            ('name', 'ilike', 'moneris'),
-            ('company_id', '=', company_id),
-        ], limit=1, context=context)
-        if moneris_ids:
-            moneris = Acquirer.browse(cr, uid, moneris_ids[0], context=context)
-            return dict.fromkeys(ids, moneris.moneris_email_account)
-        return dict.fromkeys(ids, False)
+    def _get_moneris_account(self):
+        for company in self:
+            acquirer_obj = self.env['payment.acquirer']
+            moneris_ids = acquirer_obj.search([
+                ('website_published', '=', True),
+                ('name', 'ilike', 'moneris'),
+                ('company_id', '=', self.env.user.company_id.id),
+            ], limit=1)
+            if moneris_ids:
+                company.moneris_account = moneris_ids.moneris_email_account
 
-    def _set_moneris_account(self, cr, uid, id, name, value, arg, context=None):
-        Acquirer = self.pool['payment.acquirer']
-        company_id = self.pool['res.users'].browse(cr, uid, uid, context=context).company_id.id
-        moneris_account = self.browse(cr, uid, id, context=context).moneris_account
-        moneris_ids = Acquirer.search(cr, uid, [
-            ('website_published', '=', True),
-            ('moneris_email_account', '=', moneris_account),
-            ('company_id', '=', company_id),
-        ], context=context)
-        if moneris_ids:
-            Acquirer.write(cr, uid, moneris_ids, {'moneris_email_account': value}, context=context)
-        return True
+    def _set_moneris_account(self):
+        for company in self:
+            return True
 
-    _columns = {
-        'moneris_account': fields.function(
-            _get_moneris_account,
-            fnct_inv=_set_moneris_account,
-            nodrop=True,
-            type='char', string='Moneris Account',
-            help="Moneris username (usually email) for receiving online payments."
-        ),
-    }
+    moneris_account = fields.Char(
+        compute='_get_moneris_account',
+        inverse='_set_moneris_account',
+        string='Moneris Account',
+        store=True,
+        help='Moneris username (usually email) for receiving online payments.'
+    )
+
+# vim:expandtab:smartindent:tabstop=4:softtabstop=4:shiftwidth=4:

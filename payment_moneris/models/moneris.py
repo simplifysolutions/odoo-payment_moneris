@@ -10,152 +10,176 @@ import urlparse
 import werkzeug.urls
 import urllib2
 
-from openerp.addons.payment.models.payment_acquirer import ValidationError
-from openerp.addons.payment_moneris.controllers.main import MonerisController
-from openerp.osv import osv, fields
-from openerp.tools.float_utils import float_compare
+from odoo.addons.payment.models.payment_acquirer import ValidationError
+from odoo.addons.payment_moneris.controllers.main import MonerisController
+from odoo import fields, models
+from odoo.tools import float_compare
 
 _logger = logging.getLogger(__name__)
 
 
-class AcquirerMoneris(osv.Model):
+class AcquirerMoneris(models.Model):
     _inherit = 'payment.acquirer'
-    
-    def _get_moneris_urls(self, cr, uid, environment, context=None):
+
+    moneris_email_account = fields.Char(
+        'Moneris ps_store_id', required_if_provider='moneris')
+    moneris_seller_account = fields.Char(
+        'Moneris hpp_key',
+        help='The Merchant ID is used to ensure communications coming from '
+        'Moneris are valid and secured.'
+    )
+    moneris_use_ipn = fields.Boolean(
+        'Use IPN',
+        default=True,
+        help='Moneris Instant Payment Notification'
+    )
+    # Server 2 server
+    moneris_api_enabled = fields.Boolean('Use Rest API', default=False)
+    moneris_api_username = fields.Char('Rest API Username')
+    moneris_api_password = fields.Char('Rest API Password')
+    moneris_api_access_token = fields.Char('Access Token')
+    moneris_api_access_token_validity = fields.Datetime(
+        'Access Token Validity')
+    fees_active = fields.Boolean(default=False)
+    fees_dom_fixed = fields.Float(default=0.35)
+    fees_dom_var = fields.Float(default=3.4)
+    fees_int_fixed = fields.Float(default=0.35)
+    fees_int_var = fields.Float(default=3.9)
+
+    def _get_moneris_urls(self):
         """ Moneris URLS """
-        if environment == 'prod':
+        if self.environment == 'prod':
             return {
                 'moneris_form_url': 'https://www3.moneris.com/HPPDP/index.php',
-                'moneris_auth_url': 'https://www3.moneris.com/HPPDP/verifyTxn.php',
+                'moneris_auth_url':
+                    'https://www3.moneris.com/HPPDP/verifyTxn.php',
             }
         else:
             return {
                 'moneris_form_url': 'https://esqa.moneris.com/HPPDP/index.php',
-                'moneris_auth_url': 'https://esqa.moneris.com/HPPDP/verifyTxn.php',
+                'moneris_auth_url':
+                    'https://esqa.moneris.com/HPPDP/verifyTxn.php',
             }
 
     def _get_providers(self, cr, uid, context=None):
-        providers = super(AcquirerMoneris, self)._get_providers(cr, uid, context=context)
+        providers = super(AcquirerMoneris, self)._get_providers()
         providers.append(['moneris', 'Moneris'])
         return providers
 
-    _columns = {
-        'moneris_email_account': fields.char('Moneris ps_store_id', required_if_provider='moneris'),
-        'moneris_seller_account': fields.char(
-            'Moneris hpp_key',
-            help='The Merchant ID is used to ensure communications coming from Moneris are valid and secured.'),
-        'moneris_use_ipn': fields.boolean('Use IPN', help='Moneris Instant Payment Notification'),
-        # Server 2 server
-        'moneris_api_enabled': fields.boolean('Use Rest API'),
-        'moneris_api_username': fields.char('Rest API Username'),
-        'moneris_api_password': fields.char('Rest API Password'),
-        'moneris_api_access_token': fields.char('Access Token'),
-        'moneris_api_access_token_validity': fields.datetime('Access Token Validity'),
-    }
-
-    _defaults = {
-        'moneris_use_ipn': True,
-        'fees_active': False,
-        'fees_dom_fixed': 0.35,
-        'fees_dom_var': 3.4,
-        'fees_int_fixed': 0.35,
-        'fees_int_var': 3.9,
-        'moneris_api_enabled': False,
-    }
-
-    def _migrate_moneris_account(self, cr, uid, context=None):
+    def _migrate_moneris_account(self):
         """ COMPLETE ME """
-        cr.execute('SELECT id, paypal_account FROM res_company')
-        res = cr.fetchall()
+        self.cr.execute('SELECT id, paypal_account FROM res_company')
+        res = self.cr.fetchall()
         for (company_id, company_moneris_account) in res:
             if company_moneris_account:
-                company_moneris_ids = self.search(cr, uid, [('company_id', '=', company_id), ('name', '=', 'moneris')], limit=1, context=context)
+                company_moneris_ids = self.search([
+                    ('company_id', '=', company_id),
+                    ('name', '=', 'moneris')
+                ], limit=1)
                 if company_moneris_ids:
-                    self.write(cr, uid, company_moneris_ids, {'moneris_email_account': company_moneris_account}, context=context)
+                    company_moneris_ids.write({
+                        'moneris_email_account': company_moneris_account,
+                    })
                 else:
-                    moneris_view = self.pool['ir.model.data'].get_object(cr, uid, 'payment_moneris', 'moneris_acquirer_button')
-                    self.create(cr, uid, {
+                    moneris_view = self.env.ref(
+                        'payment_moneris.moneris_acquirer_button'
+                    )
+                    self.create({
                         'name': 'moneris',
                         'moneris_email_account': company_moneris_account,
                         'view_template_id': moneris_view.id,
-                    }, context=context)
+                    })
         return True
 
-    def moneris_compute_fees(self, cr, uid, id, amount, currency_id, country_id, context=None):
+    def moneris_compute_fees(self, amount, currency_id, country_id):
         """ Compute moneris fees.
 
             :param float amount: the amount to pay
             :param integer country_id: an ID of a res.country, or None. This is
-                                       the customer's country, to be compared to
-                                       the acquirer company country.
+                                       the customer's country, to be compared
+                                       to the acquirer company country.
             :return float fees: computed fees
         """
-        acquirer = self.browse(cr, uid, id, context=context)
-        if not acquirer.fees_active:
-            return 0.0
-        country = self.pool['res.country'].browse(cr, uid, country_id, context=context)
-        if country and acquirer.company_id.country_id.id == country.id:
-            percentage = acquirer.fees_dom_var
-            fixed = acquirer.fees_dom_fixed
-        else:
-            percentage = acquirer.fees_int_var
-            fixed = acquirer.fees_int_fixed
-        fees = (percentage / 100.0 * amount + fixed ) / (1 - percentage / 100.0)
+        for acquirer in self:
+            if not acquirer.fees_active:
+                return 0.0
+            country = self.env['res.country'].browse(country_id)
+            if country and acquirer.company_id.country_id.id == country.id:
+                percentage = acquirer.fees_dom_var
+                fixed = acquirer.fees_dom_fixed
+            else:
+                percentage = acquirer.fees_int_var
+                fixed = acquirer.fees_int_fixed
+            fees = (percentage / 100.0 * amount + fixed) / (
+                1 - percentage / 100.0)
         return fees
 
-    def moneris_form_generate_values(self, cr, uid, id, partner_values, tx_values, context=None):
-        base_url = self.pool['ir.config_parameter'].get_param(cr, uid, 'web.base.url')
-        acquirer = self.browse(cr, uid, id, context=context)
+    def moneris_form_generate_values(self, partner_values, tx_values):
+        base_url = self.env['ir.config_parameter'].get_param('web.base.url')
+        for acquirer in self:
 
-        moneris_tx_values = dict(tx_values)
-        moneris_tx_values.update({
-            'cmd': '_xclick',
-            'business': acquirer.moneris_email_account,
-            'item_name': tx_values['reference'],
-            'item_number': tx_values['reference'],
-            'amount': tx_values['amount'],
-            'currency_code': tx_values['currency'] and tx_values['currency'].name or '',
-            'address1': partner_values['address'],
-            'city': partner_values['city'],
-            'country': partner_values['country'] and partner_values['country'].name or '',
-            'state': partner_values['state'] and partner_values['state'].name or '',
-            'email': partner_values['email'],
-            'zip': partner_values['zip'],
-            'first_name': partner_values['first_name'],
-            'last_name': partner_values['last_name'],
-            'return': '%s' % urlparse.urljoin(base_url, MonerisController._return_url),
-            'notify_url': '%s' % urlparse.urljoin(base_url, MonerisController._notify_url),
-            'cancel_return': '%s' % urlparse.urljoin(base_url, MonerisController._cancel_url),
-        })
-        tx_ids = self.pool['payment.transaction'].search(cr, uid, [('reference', '=', tx_values['reference'])], context=context)
+            moneris_tx_values = dict(tx_values)
+            moneris_tx_values.update({
+                'cmd': '_xclick',
+                'business': acquirer.moneris_email_account,
+                'item_name': tx_values['reference'],
+                'item_number': tx_values['reference'],
+                'amount': tx_values['amount'],
+                'currency_code': tx_values['currency'] and
+                tx_values['currency'].name or '',
+                'address1': partner_values['address'],
+                'city': partner_values['city'],
+                'country': partner_values['country'] and
+                partner_values['country'].name or '',
+                'state': partner_values['state'] and
+                partner_values['state'].name or '',
+                'email': partner_values['email'],
+                'zip': partner_values['zip'],
+                'first_name': partner_values['first_name'],
+                'last_name': partner_values['last_name'],
+                'return': '%s' % urlparse.urljoin(
+                    base_url, MonerisController._return_url),
+                'notify_url': '%s' % urlparse.urljoin(
+                    base_url, MonerisController._notify_url),
+                'cancel_return': '%s' % urlparse.urljoin(
+                    base_url, MonerisController._cancel_url),
+            })
+        tx_ids = self.env['payment.transaction'].search([
+            ('reference', '=', tx_values['reference'])
+        ])
         for tx in tx_ids:
-            tx = self.pool['payment.transaction'].browse(cr, uid, tx, context=context)
-            tx.write({'amount': tx_values['amount']})
-                    
+            tx.amount = tx_values['amount']
+
         if acquirer.fees_active:
-            moneris_tx_values['handling'] = '%.2f' % moneris_tx_values.pop('fees', 0.0)
+            moneris_tx_values['handling'] = \
+                '%.2f' % moneris_tx_values.pop('fees', 0.0)
         if moneris_tx_values.get('return_url'):
-            moneris_tx_values['custom'] = json.dumps({'return_url': '%s' % moneris_tx_values.pop('return_url')})
+            moneris_tx_values['custom'] = json.dumps({
+                'return_url': '%s' % moneris_tx_values.pop('return_url')
+            })
         return partner_values, moneris_tx_values
 
-    def moneris_get_form_action_url(self, cr, uid, id, context=None):
-        acquirer = self.browse(cr, uid, id, context=context)
-        return self._get_moneris_urls(cr, uid, acquirer.environment, context=context)['moneris_form_url']
+    def moneris_get_form_action_url(self):
+        return self._get_moneris_urls()['moneris_form_url']
 
-    def _moneris_s2s_get_access_token(self, cr, uid, ids, context=None):
+    def _moneris_s2s_get_access_token(self):
         """
-        Note: see # see http://stackoverflow.com/questions/2407126/python-urllib2-basic-auth-problem
+        Note: see
+        http://stackoverflow.com/questions/
+            2407126/python-urllib2-basic-auth-problem
         for explanation why we use Authorization header instead of urllib2
         password manager
         """
-        res = dict.fromkeys(ids, False)
+        res = dict.fromkeys(self.ids, False)
         parameters = werkzeug.url_encode({'grant_type': 'client_credentials'})
 
-        for acquirer in self.browse(cr, uid, ids, context=context):
-            tx_url = self._get_moneris_urls(cr, uid, acquirer.environment)['moneris_rest_url']
+        for acquirer in self:
+            tx_url = acquirer._get_moneris_urls()['moneris_rest_url']
             request = urllib2.Request(tx_url, parameters)
 
-            # add other headers (https://developer.moneris.com/webapps/developer/docs/integration/direct/make-your-first-call/)
+            # add other headers
+            # https://developer.moneris.com/webapps/developer/docs
+            # /integration/direct/make-your-first-call/)
             request.add_header('Accept', 'application/json')
             request.add_header('Accept-Language', 'en_US')
 
@@ -173,35 +197,36 @@ class AcquirerMoneris(osv.Model):
         return res
 
 
-class TxMoneris(osv.Model):
+class TxMoneris(models.Model):
     _inherit = 'payment.transaction'
 
-    _columns = {
-        'moneris_txn_id': fields.char('Transaction ID'),
-        'moneris_txn_type': fields.char('Transaction type'),
-        'moneris_txn_oid': fields.char('Order ID'),
-        'moneris_txn_response': fields.char('Response Code'),
-        'moneris_txn_ISO': fields.char('ISO'),
-        'moneris_txn_eci': fields.char('Electronic Commerce Indicator'),
-        'moneris_txn_card': fields.char('Card Type'),
-        'moneris_txn_cardf4l4': fields.char('First 4 Last 4'),
-        'moneris_txn_bankid': fields.char('Bank Transaction ID'),
-        'moneris_txn_bankapp': fields.char('Bank Approval Code'),
-    }
+    moneris_txn_id = fields.Char('Transaction ID')
+    moneris_txn_type = fields.Char('Transaction type')
+    moneris_txn_oid = fields.Char('Order ID')
+    moneris_txn_response = fields.Char('Response Code')
+    moneris_txn_ISO = fields.Char('ISO')
+    moneris_txn_eci = fields.Char('Electronic Commerce Indicator')
+    moneris_txn_card = fields.Char('Card Type')
+    moneris_txn_cardf4l4 = fields.Char('First 4 Last 4')
+    moneris_txn_bankid = fields.Char('Bank Transaction ID')
+    moneris_txn_bankapp = fields.Char('Bank Approval Code')
 
     # --------------------------------------------------
     # FORM RELATED METHODS
     # --------------------------------------------------
 
-    def _moneris_form_get_tx_from_data(self, cr, uid, data, context=None):
+    def _moneris_form_get_tx_from_data(self, data):
         reference, txn_id = data.get('rvaroid'), data.get('txn_num')
         if not reference or not txn_id:
-            error_msg = 'Moneris: received data with missing reference (%s) or txn_id (%s)' % (reference, txn_id)
+            error_msg = 'Moneris: received data with missing reference (%s) "\
+                "or txn_id (%s)' % (reference, txn_id)
             _logger.error(error_msg)
             raise ValidationError(error_msg)
 
         # find tx -> @TDENOTE use txn_id ?
-        tx_ids = self.pool['payment.transaction'].search(cr, uid, [('reference', '=', reference)], context=context)
+        tx_ids = self.pool['payment.transaction'].search([
+            ('reference', '=', reference)
+        ])
         if not tx_ids or len(tx_ids) > 1:
             error_msg = 'Moneris: received data for reference %s' % (reference)
             if not tx_ids:
@@ -210,14 +235,15 @@ class TxMoneris(osv.Model):
                 error_msg += '; multiple order found'
             _logger.error(error_msg)
             raise ValidationError(error_msg)
-        return self.browse(cr, uid, tx_ids[0], context=context)
+        return tx_ids[0]
 
-    def _moneris_form_get_invalid_parameters(self, cr, uid, tx, data, context=None):
+    def _moneris_form_get_invalid_parameters(self, tx, data):
         invalid_parameters = []
         """
         if data.get('notify_version')[0] != '3.4':
             _logger.warning(
-                'Received a notification from Moneris with version %s instead of 2.6. This could lead to issues when managing it.' %
+                'Received a notification from Moneris with version %s instead
+                of 2.6. This could lead to issues when managing it.' %
                 data.get('notify_version')
             )
         if data.get('test_ipn'):
@@ -225,38 +251,63 @@ class TxMoneris(osv.Model):
                 'Received a notification from Moneris using sandbox'
             ),
         """
-        # TODO: txn_id: shoudl be false at draft, set afterwards, and verified with txn details
+        # TODO: txn_id: shoudl be false at draft, set afterwards,
+        #       and verified with txn details
         if tx.moneris_txn_id and data.get('txn_num') != tx.moneris_txn_id:
-            invalid_parameters.append(('txn_num', data.get('txn_num'), tx.moneris_txn_id))
-        if tx.acquirer_reference and data.get('response_order_id') != tx.acquirer_reference:
-            invalid_parameters.append(('response_order_id', data.get('response_order_id'), tx.acquirer_reference))
+            invalid_parameters.append(
+                ('txn_num', data.get('txn_num'), tx.moneris_txn_id)
+            )
+        if tx.acquirer_reference and data.get(
+                'response_order_id') != tx.acquirer_reference:
+            invalid_parameters.append(
+                ('response_order_id',
+                 data.get('response_order_id'),
+                 tx.acquirer_reference)
+            )
         # check what is buyed
-        if float_compare(float(data.get('charge_total', '0.0')), (tx.amount), 2) != 0:
-            invalid_parameters.append(('charge_total', data.get('charge_total'), '%.2f' % tx.amount))
+        if float_compare(
+                float(data.get('charge_total', '0.0')
+                      ), (tx.amount), 2) != 0:
+            invalid_parameters.append(
+                ('charge_total', data.get('charge_total'), '%.2f' % tx.amount)
+            )
         """
         if data.get('mc_currency') != tx.currency_id.name:
-            invalid_parameters.append(('mc_currency', data.get('mc_currency'), tx.currency_id.name))
+            invalid_parameters.append(
+            ('mc_currency', data.get('mc_currency'), tx.currency_id.name))
         """
         """
-        if 'handling_amount' in data and float_compare(float(data.get('handling_amount')), tx.fees, 2) != 0:
-            invalid_parameters.append(('handling_amount', data.get('handling_amount'), tx.fees))
+        if 'handling_amount' in data and float_compare(
+        float(data.get('handling_amount')), tx.fees, 2) != 0:
+            invalid_parameters.append(
+            ('handling_amount', data.get('handling_amount'), tx.fees))
         """
         # check buyer
         """
-        if tx.partner_reference and data.get('payer_id') != tx.partner_reference:
-            invalid_parameters.append(('payer_id', data.get('payer_id'), tx.partner_reference))
+        if tx.partner_reference and data.get(
+        'payer_id') != tx.partner_reference:
+            invalid_parameters.append(
+            ('payer_id', data.get('payer_id'), tx.partner_reference))
         """
         # check seller
         '''
         if data.get('rvarid') != tx.acquirer_id.moneris_email_account:
-            invalid_parameters.append(('rvarid', data.get('rvarid'), tx.acquirer_id.moneris_email_account))
+            invalid_parameters.append(
+            ('rvarid',
+            data.get('rvarid'),
+            tx.acquirer_id.moneris_email_account)
+            )
         if data.get('rvarkey') != tx.acquirer_id.moneris_seller_account:
-            invalid_parameters.append(('rvarkey', data.get('rvarkey'), tx.acquirer_id.moneris_seller_account))
+            invalid_parameters.append(
+            ('rvarkey',
+            data.get('rvarkey'),
+            tx.acquirer_id.moneris_seller_account)
+            )
         '''
 
         return invalid_parameters
 
-    def _moneris_form_validate(self, cr, uid, tx, data, context=None):
+    def _moneris_form_validate(self, tx, data):
         status = data.get('result')
         data = {
             'moneris_txn_id': data.get('txn_num'),
@@ -273,11 +324,18 @@ class TxMoneris(osv.Model):
             'acquirer_reference': data.get('response_order_id')
         }
         if status == '1':
-            _logger.info('Validated Moneris payment for tx %s: set as done' % (tx.reference))
-            data.update(state='done', date_validate=data.get('date_stamp', fields.datetime.now()))
+            _logger.info(
+                'Validated Moneris payment for tx %s: set as done' %
+                (tx.reference)
+            )
+            data.update(
+                state='done',
+                date_validate=data.get('date_stamp', fields.Datetime.now())
+            )
             return tx.write(data)
         else:
-            error = 'Received unrecognized status for Moneris payment %s: %s, set as error' % (tx.reference, status)
+            error = 'Received unrecognized status for Moneris payment %s: '\
+                '%s, set as error' % (tx.reference, status)
             _logger.info(error)
             data.update(state='error', state_message=error)
             return tx.write(data)
@@ -286,7 +344,7 @@ class TxMoneris(osv.Model):
     # SERVER2SERVER RELATED METHODS
     # --------------------------------------------------
 
-    def _moneris_try_url(self, request, tries=3, context=None):
+    def _moneris_try_url(self, request, tries=3):
         """ Try to contact Moneris. Due to some issues, internal service errors
         seem to be quite frequent. Several tries are done before considering
         the communication as failed.
@@ -305,8 +363,11 @@ class TxMoneris(osv.Model):
             except urllib2.HTTPError as e:
                 res = e.read()
                 e.close()
-                if tries and res and json.loads(res)['name'] == 'INTERNAL_SERVICE_ERROR':
-                    _logger.warning('Failed contacting Moneris, retrying (%s remaining)' % tries)
+                if tries and res and json.loads(
+                        res)['name'] == 'INTERNAL_SERVICE_ERROR':
+                    _logger.warning(
+                        'Failed contacting Moneris, retrying (%s remaining)' %
+                        tries)
             tries = tries - 1
         if not res:
             pass
@@ -328,7 +389,8 @@ class TxMoneris(osv.Model):
 
         headers = {
             'Content-Type': 'application/json',
-            'Authorization': 'Bearer %s' % tx.acquirer_id._moneris_s2s_get_access_token()[tx.acquirer_id.id],
+            'Authorization': 'Bearer %s' %
+            tx.acquirer_id._moneris_s2s_get_access_token()[tx.acquirer_id.id],
         }
         data = {
             'intent': 'sale',
@@ -372,11 +434,15 @@ class TxMoneris(osv.Model):
             }
         data = json.dumps(data)
 
-        request = urllib2.Request('https://api.sandbox.moneris.com/v1/payments/payment', data, headers)
-        result = self._moneris_try_url(request, tries=3, context=context)
+        request = urllib2.Request(
+            'https://api.sandbox.moneris.com/v1/payments/payment',
+            data,
+            headers
+        )
+        result = self._moneris_try_url(request, tries=3)
         return (tx_id, result)
 
-    def _moneris_s2s_get_invalid_parameters(self, cr, uid, tx, data, context=None):
+    def _moneris_s2s_get_invalid_parameters(self, data):
         """
          .. versionadded:: pre-v8 saas-3
          .. warning::
@@ -387,7 +453,7 @@ class TxMoneris(osv.Model):
         invalid_parameters = []
         return invalid_parameters
 
-    def _moneris_s2s_validate(self, cr, uid, tx, data, context=None):
+    def _moneris_s2s_validate(self, tx, data):
         """
          .. versionadded:: pre-v8 saas-3
          .. warning::
@@ -398,15 +464,22 @@ class TxMoneris(osv.Model):
         values = json.loads(data)
         status = values.get('state')
         if status in ['approved']:
-            _logger.info('Validated Moneris s2s payment for tx %s: set as done' % (tx.reference))
+            _logger.info(
+                'Validated Moneris s2s payment for tx %s: set as done' %
+                (tx.reference)
+            )
             tx.write({
                 'state': 'done',
-                'date_validate': values.get('udpate_time', fields.datetime.now()),
+                'date_validate': values.get(
+                    'udpate_time', fields.Datetime.now()),
                 'moneris_txn_id': values['id'],
             })
             return True
         elif status in ['pending', 'expired']:
-            _logger.info('Received notification for Moneris s2s payment %s: set as pending' % (tx.reference))
+            _logger.info(
+                'Received notification for Moneris s2s payment %s: '
+                'set as pending' % (tx.reference)
+            )
             tx.write({
                 'state': 'pending',
                 # 'state_message': data.get('pending_reason', ''),
@@ -414,7 +487,8 @@ class TxMoneris(osv.Model):
             })
             return True
         else:
-            error = 'Received unrecognized status for Moneris s2s payment %s: %s, set as error' % (tx.reference, status)
+            error = 'Received unrecognized status for Moneris s2s payment '\
+                '%s: %s, set as error' % (tx.reference, status)
             _logger.info(error)
             tx.write({
                 'state': 'error',
@@ -434,9 +508,11 @@ class TxMoneris(osv.Model):
         # TDETODO: check tx.moneris_txn_id is set
         headers = {
             'Content-Type': 'application/json',
-            'Authorization': 'Bearer %s' % tx.acquirer_id._moneris_s2s_get_access_token()[tx.acquirer_id.id],
+            'Authorization': 'Bearer %s' %
+            tx.acquirer_id._moneris_s2s_get_access_token()[tx.acquirer_id.id],
         }
-        url = 'https://api.sandbox.moneris.com/v1/payments/payment/%s' % (tx.moneris_txn_id)
+        url = 'https://api.sandbox.moneris.com/v1/payments/payment/%s' % (
+            tx.moneris_txn_id)
         request = urllib2.Request(url, headers=headers)
-        data = self._moneris_try_url(request, tries=3, context=context)
+        data = self._moneris_try_url(request, tries=3)
         return self.s2s_feedback(cr, uid, tx.id, data, context=context)
