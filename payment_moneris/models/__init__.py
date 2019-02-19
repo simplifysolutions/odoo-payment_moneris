@@ -1,4 +1,4 @@
 # -*- coding: utf-8 -*-
 
-import moneris
-import res_company
+from . import moneris
+from . import res_company

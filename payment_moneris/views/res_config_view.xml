@@ -1,8 +1,9 @@
 <?xml version="1.0"?>
 <openerp>
     <data>
-        
+
         <!--  Add payment options to sale.order and invoice forms -->
+        <!--
         <record model="ir.ui.view" id="payment_moneris_option_config">
             <field name="model">account.config.settings</field>
             <field name="inherit_id" ref="account.view_account_config_settings"/>
@@ -13,6 +14,7 @@
                 </xpath>
             </field>
         </record>
+        -->
  
     </data>
 </openerp>

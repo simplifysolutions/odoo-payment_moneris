@@ -6,9 +6,10 @@ try:
 except ImportError:
     import json
 import logging
-import urlparse
+from urllib.parse import urlparse
 import werkzeug.urls
-import urllib2
+from urllib.request import urlopen, Request
+from urllib.error import HTTPError
 
 from odoo.addons.payment.models.payment_acquirer import ValidationError
 from odoo.addons.payment_moneris.controllers.main import MonerisController
@@ -175,7 +176,7 @@ class AcquirerMoneris(models.Model):
 
         for acquirer in self:
             tx_url = acquirer._get_moneris_urls()['moneris_rest_url']
-            request = urllib2.Request(tx_url, parameters)
+            request = Request(tx_url, parameters)
 
             # add other headers
             # https://developer.moneris.com/webapps/developer/docs
@@ -190,7 +191,7 @@ class AcquirerMoneris(models.Model):
             ).replace('\n', '')
             request.add_header("Authorization", "Basic %s" % base64string)
 
-            request = urllib2.urlopen(request)
+            request = urlopen(request)
             result = request.read()
             res[acquirer.id] = json.loads(result).get('access_token')
             request.close()
@@ -358,9 +359,9 @@ class TxMoneris(models.Model):
         done, res = False, None
         while (not done and tries):
             try:
-                res = urllib2.urlopen(request)
+                res = urlopen(request)
                 done = True
-            except urllib2.HTTPError as e:
+            except HTTPError as e:
                 res = e.read()
                 e.close()
                 if tries and res and json.loads(
@@ -434,7 +435,7 @@ class TxMoneris(models.Model):
             }
         data = json.dumps(data)
 
-        request = urllib2.Request(
+        request = Request(
             'https://api.sandbox.moneris.com/v1/payments/payment',
             data,
             headers
@@ -513,6 +514,6 @@ class TxMoneris(models.Model):
         }
         url = 'https://api.sandbox.moneris.com/v1/payments/payment/%s' % (
             tx.moneris_txn_id)
-        request = urllib2.Request(url, headers=headers)
+        request = Request(url, headers=headers)
         data = self._moneris_try_url(request, tries=3)
         return self.s2s_feedback(cr, uid, tx.id, data, context=context)

@@ -6,7 +6,7 @@ except ImportError:
     import json
 import logging
 import pprint
-import urllib2
+from urllib.request import urlopen, Request
 import werkzeug
 from openerp import SUPERUSER_ID
 
@@ -70,8 +70,8 @@ class MonerisController(http.Controller):
 
         new_post = dict(ps_store_id=sid, hpp_key=key, transactionKey=post.get('transactionKey'))
         
-        urequest = urllib2.Request(validate_url, werkzeug.url_encode(new_post))
-        uopen = urllib2.urlopen(urequest)
+        urequest = Request(validate_url, werkzeug.url_encode(new_post))
+        uopen = urlopen(urequest)
         resp = uopen.read()
         _logger.info(resp)
 
